@@ -1,0 +1,125 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math
+
+from pyrsistent import v
+
+class Update:
+    def __init__(self, update):
+        self.source = update['src']
+        self.network = update['msg']['network']
+        self.netmask = update['msg']['netmask']
+        self.localpref = update['msg']['localpref']
+        self.aspath = update['msg']['ASPath']
+        self.origin = update['msg']['selfOrigin']
+
+    def in_range(self, ip):
+        ip_b = self.convert_to_binary(ip)
+        network_b = self.convert_to_binary(self.network)
+        netmask_b = self.convert_to_binary(self.network)
+        for i in range(len(netmask_b)):
+            if netmask_b[i] == '1':
+                if ip_b[i] != network_b[i]:
+                    return False
+            return True
+
+    def netmask_len(self):
+        netmask_b = self.convert_to_binary(self.network)
+        netmask_len = 0
+        for c in netmask_b:
+            if c == '1':
+                netmask_len += 1
+        return netmask_len
+    
+    def convert_to_binary(self, num):
+        split = num.split('.')
+        binary_string = ''
+        for section in split:
+            binary_string += '{0:08b}'.format(int(section))
+
+class ForwardingTable:
+    def __init__(self):
+        self.updates_heard = []
+        self.routes = []
+
+    def update(self, update):
+        self.updates_heard.append(update)
+        self.routes.append(update)
+
+    def find_route(self, dest):
+        best_neighbor = None
+        best_len = 0
+        for route in self.routes:
+            if route.in_range(dest):
+                if route.netmask_len() > best_len:
+                    best_neighbor = route.source
+                    best_len = route.netmask_len()
+        return best_neighbor
+
+class Router:
+
+    relations = {}
+    sockets = {}
+    ports = {}
+
+    def __init__(self, asn, connections):
+        print("Router at AS %s starting up" % asn)
+        self.asn = asn
+        self.forwarding = ForwardingTable()
+        for relationship in connections:
+            port, neighbor, relation = relationship.split("-")
+
+            self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sockets[neighbor].bind(('localhost', 0))
+            self.ports[neighbor] = int(port)
+            self.relations[neighbor] = relation
+            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+
+    def our_addr(self, dst):
+        quads = list(int(qdn) for qdn in dst.split('.'))
+        quads[3] = 1
+        return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
+
+    def send(self, network, message):
+        print(f'Sending {message} to {network}')
+        self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+
+    def run(self):
+        while True:
+            socks = select.select(self.sockets.values(), [], [], 0.1)[0]
+            for conn in socks:
+                k, addr = conn.recvfrom(65535)
+                srcip = None
+                for sock in self.sockets:
+                    if self.sockets[sock] == conn:
+                        srcip = sock
+                        break
+                msg = json.loads(k.decode('utf-8'))
+
+                if msg['type'] == "handshake":
+                    pass
+                if msg['type'] == "update":
+                    self.forwarding.update(Update(msg))
+                if msg['type'] == "withdraw":
+                    pass
+                if msg['type'] == "data":
+                    self.send(self.forwarding.find_route(msg['dst']), msg)
+                if msg['type'] == "no route":
+                    pass
+                if msg['type'] == "dump":
+                    pass
+                if msg['type'] == "table":
+                    pass
+
+
+                print("Received message '%s' from %s" % (msg, srcip))
+
+        return
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='route packets')
+    parser.add_argument('asn', type=int, help="AS number of this router")
+    parser.add_argument('connections', metavar='connections', type=str, nargs='+', help="connections")
+    args = parser.parse_args()
+    router = Router(args.asn, args.connections)
+    router.run()
