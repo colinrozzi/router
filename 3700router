@@ -1,15 +1,20 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
-from operator import ne
+from fcntl import F_SEAL_SEAL
+from hashlib import new
+from operator import eq, ne
+
+from numpy import sort
 
 class Router:
-
     relations = {}
     sockets = {}
     ports = {}
     updates_heard = []
+    routes_heard = []
     routing_table = []
+    bad_routes = []
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -28,54 +33,221 @@ class Router:
         quads = list(int(qdn) for qdn in dst.split('.'))
         quads[3] = 1
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
-
-    def update_routing(self, msg):
+   
+    def update_routing(self, msg, srcip):
         route_dict = {
             "network" : msg['msg']['network'], 
             "netmask" : msg['msg']['netmask'], 
-            "peer" : msg['src'], 
+            "peer" : srcip, 
             "localpref": msg['msg']['localpref'], 
             "ASPath": msg['msg']['ASPath'], 
             "selfOrigin": msg['msg']['selfOrigin'], 
             "origin": msg['msg']['origin']
         }
-        self.add_to_routing(route_dict)
+        # self.routing_table.append(route_dict)
+        self.updates_heard.append(route_dict)
+        print(self.updates_heard)
+        self.routes_heard.append(route_dict)
+        self.routing_table = self.aggregate_rt()
+        # print('s', self.sort_rt())
 
-        # if not self.check_exists(route_dict):
-        #     self.routing_table.append(route_dict)
-        
-    def add_to_routing(self, route_dict):
-        new_routing = []
-        new_route = self.relevant_bits(route_dict['network'], route_dict['netmask'])
-        for route in self.routing_table:
-            existing_route = self.relevant_bits(route['network'], route['netmask'])
-            if new_route == existing_route:
-                
-                
+    def aggregate_rt(self):
+        sorted_rt = self.sort_rt(self.routes_heard)
+        aggregated_rt = self.aggregate(sorted_rt)
+        return aggregated_rt
+
+    def aggregate(self, routing_table):
+        print('AGGREGATING AJNMAJAJAJAJAJAJAJAJ')
+        new_table = []
+        changed = False
+        aggregated = []
+        for i in range(len(routing_table)):
+            print('working on ', routing_table[i])
+            print(i)
+            if not i in aggregated:
+                if i != (len(routing_table) - 1):
+                    if routing_table[i]['netmask'] == routing_table[i + 1]['netmask'] and self.adjacent(routing_table[i], routing_table[i + 1]):
+                        if (routing_table[i]['peer'] == routing_table[i + 1]['peer'] and routing_table[i]['localpref'] == routing_table[i + 1]['localpref'] and routing_table[i]['ASPath'] == routing_table[i + 1]['ASPath'] and routing_table[i]['selfOrigin'] == routing_table[i + 1]['selfOrigin'] and routing_table[i]['origin'] == routing_table[i + 1]['origin']):
+                            print('everything matches!')
+                            print(f'aggregateing {routing_table[i]}')
+                            print(f'and {routing_table[i+1]}')
+                            new_table.append(self.new_entry(routing_table[i], routing_table[i + 1]))
+                            aggregated.append(i)
+                            aggregated.append(i + 1)
+                            changed = True
+                        else:
+                            new_table.append(routing_table[i])
+                    else:
+                        new_table.append(routing_table[i])
+                else:
+                    new_table.append(routing_table[i])
+        print('done')
+        if changed:
+            print(new_table)
+            print('going again')
+            return self.aggregate(new_table)
+        else:
+            return new_table
 
 
-    def check_exists(self, route_dict):
-        relevant_bits = self.relevant_bits(route_dict['network'], route_dict['netmask'])
-        for existing_route in self.routing_table:
-            existing_route_bits = self.relevant_bits(existing_route['network'], existing_route['netmask'])
-            if relevant_bits == existing_route_bits:
-                return True
+    def adjacent(self, route1, route2):
+        one_bits = self.relevant_bits(route1['network'], route1['netmask'])
+        two_bits = self.relevant_bits(route2['network'], route2['netmask'])
+        for j in range(min(len(one_bits), len(two_bits))):
+            if one_bits[j] != two_bits[j]:
+                if j == len(one_bits) - 1:
+                    return True
+                else:
+                    return False
+
+    def no_bad_routes(self, route1, route2):
+        temp_bad = self.bad_routes.copy()
+        temp_bad.append(route1)
+        temp_bad.append(route2)
+        sorted_temp = self.sort_rt(temp_bad)
+        for i in range(len(sorted_temp)):
+            if i != (len(sorted_temp) - 1):
+                if sorted_temp[i] == route1:
+                    if sorted_temp[i + 1] == route2:
+                        return True
+                elif sorted_temp[i] == route2:
+                    if sorted_temp[i + 1] == route1:
+                        return True
         return False
-        
-        # for update in self.updates_heard:
-        #     routing_ip = self.relevant_bits(update['update']['network'], update['update']['netmask'])
-        #     if not routing_ip in self.rt_ips:
-        #         self.rt_ips.append(routing_ip)
-        #         self.rt_neighbors[routing_ip] = update['neighbor']
-        #         self.rt_updates[routing_ip] = update
-        #     else:
-        #         best_update = self.compare_updates(update, self.rt_updates[routing_ip])
-        #         self.rt_neighbors[routing_ip] = best_update['neighbor']
-        #         self.rt_updates[routing_ip] = best_update
 
-    def compare_updates(self, update1, update2):
-        # TODO: implement compare updates
-        return update1
+
+    def new_entry(self, route1, route2):
+        new_stuff = self.new_bits(route1, route2)
+        network = self.convert_decimal(new_stuff[0])
+        print('network', network)
+        netmask = self.convert_decimal(new_stuff[1])
+        print('netmask', netmask)
+        route_dict = {
+            "network" : network, 
+            "netmask" : netmask, 
+            "peer" : route1['peer'],
+            "localpref": route1['localpref'],
+            "ASPath": route1['ASPath'],
+            "selfOrigin": route1['selfOrigin'],
+            "origin": route1['origin']
+        }
+        return route_dict
+
+    def new_bits(self, route1, route2):
+        one_bits = self.relevant_bits(route1['network'], route1['netmask'])
+        two_bits = self.relevant_bits(route2['network'], route2['netmask'])
+        bits = ''
+        netmask = ''
+        for j in range(min(len(one_bits), len(two_bits))):
+            if one_bits[j] == two_bits[j]:
+                bits += one_bits[j]
+                netmask += '1'
+            else:
+                print(bits)
+                print(netmask)
+                return (bits, netmask)
+        return ('', '')
+
+    def convert_decimal(self, bits):
+        print(bits)
+        print('whaaaaat')
+        while len(bits) < 32:
+            bits += '0'
+        print(bits)
+        print(bits[:8])
+        print(int(bits[:8], 2))
+        quads = []
+        quads.append(int(bits[:8], 2))
+        quads.append(int(bits[8:16], 2))
+        quads.append(int(bits[16:24], 2))
+        quads.append(int(bits[24:32], 2))
+        print(quads)
+        return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
+    
+    def sort_rt(self, rt):
+        unsorted_rt = rt.copy()
+        sorted_rt = []
+
+        while len(unsorted_rt) > 0:
+            # print('current unsorted', unsorted_rt)
+            min_route = None
+            for i in range(len(unsorted_rt)):
+                # print(f'working on {unsorted_rt[i]}')
+                if min_route == None:
+                    min_route = unsorted_rt[i]
+                else:
+                    c = self.less_than(min_route, unsorted_rt[i])
+                    # print('c is ', c)
+                    if c == 2:
+                        min_route = unsorted_rt[i]
+            # print('found min', min_route)
+            sorted_rt.append(min_route)
+            unsorted_rt.remove(min_route)
+        return sorted_rt
+    
+    def less_than(self, route1, route2):
+        one_bits = self.relevant_bits(route1['network'], route1['netmask'])
+        two_bits = self.relevant_bits(route2['network'], route2['netmask'])
+        # print(f'comparing {one_bits}, {two_bits}')
+        if len(one_bits) == len(two_bits):
+            for i in range(len(one_bits)):
+                # print(i)
+                if one_bits[i] < two_bits[i]:
+                    # print(1)
+                    return 1
+                if two_bits[i] < one_bits[i]:
+                    # print(2)
+                    return 2
+                # print('nothing')
+            return 1
+        else:
+            if len(one_bits) < len(two_bits):
+                return 1
+            else:
+                return 2
+
+    def better_route(self, route1, route2):
+        if route1 == None:
+            return route2
+        if route2 == None:
+            return route1
+        if route1['localpref'] == route2['localpref']:
+            if route1['selfOrigin'] == route2['selfOrigin']:
+                if route1['ASPath'] == route2['ASPath']:
+                    if route1['origin'] == route2['origin']:
+                        if route1['peer'] < route2['peer']:
+                            return route1
+                        else:
+                            return route2
+                    else:
+
+                        if route1['origin'] == 'IGP':
+                            return route1
+                        if route2['origin'] == 'IGP':
+                            return route2
+                        if route1['origin'] == 'EGP':
+                            return route1
+                        if route2['origin'] == 'EGP':
+                            return route2
+                        if route1['origin'] == 'UNK':
+                            return route1
+                        if route2['origin'] == 'UNK':
+                            return route2
+                else:
+                    if len(route1['ASPath']) < len(route2['ASPath']):
+                        return route1
+                    else:
+                        return route2
+            else:
+                if route1['selfOrigin'] == True:
+                    return route1
+                else:
+                    return route2
+        else:
+            if route1['localpref'] > route2['localpref']:
+                return route1
+            else:
+                return route2
 
     def relevant_bits(self, network, netmask):
         network_b = self.convert_to_binary(network)
@@ -94,17 +266,20 @@ class Router:
         return binary_string
 
     def find_routing(self, ip):
-        best_neighbor = None
+        best_route = None
         best_len = 0
         for route in self.routing_table:
             rt_ip = self.relevant_bits(route['network'], route['netmask'])
-            if self.matches(ip, route) and len(rt_ip) > best_len:
-                best_neighbor = route['peer']
-        return best_neighbor
+            if self.matches(ip, rt_ip) and len(rt_ip) >= best_len:
+                best_len = len(rt_ip)
+                best_route = self.better_route(best_route, route)
+        if best_route == None:
+            return None
+        else:
+            return best_route['peer']
 
-    def matches(self, ip, route):
+    def matches(self, ip, rt_ip):
         bit_ip = self.convert_to_binary(ip)
-        rt_ip = self.relevant_bits(route['network'], route['netmask'])
         for c in range(len(rt_ip)):
             if not bit_ip[c] == rt_ip[c]:
                 return False
@@ -140,12 +315,8 @@ class Router:
     def process_update(self, msg, srcip):
         self.updates_heard.append({'update':msg['msg'], 'neighbor':srcip})
         self.forward_update(msg, srcip)
-        for neighbor in self.ports:
-            if neighbor != srcip:
-                self.send(neighbor, self.make_sendable_update(msg, self.our_addr(neighbor), neighbor))
-        self.update_routing(msg)
-        print(self.rt_neighbors)
-
+        self.update_routing(msg, srcip)
+        
     def forward_update(self, msg, srcip):
         if self.relations[srcip] == 'cust':
             for neighbor in self.ports:
@@ -165,41 +336,54 @@ class Router:
     def process_withdraw(self, msg, srcip):
         self.remove_routes(msg, srcip)
         self.forward_withdraw(msg, srcip)
+        self.routing_table = self.aggregate_rt()
 
     def remove_routes(self, msg, srcip):
         new_routes = []
-        for route in self.routing_table:
+        for route in self.routes_heard:
             remove = False
             for dep_route in msg['msg']:
                 if dep_route['network'] == route['network'] and dep_route['netmask'] == route['netmask'] and srcip == route['peer']:
                     remove = True
-            if not remove:
+            if remove:
+                self.bad_routes.append(route)
+            else:
                 new_routes.append(route)
-        self.routing_table = new_routes
+            
+        self.routes_heard = new_routes
 
     def forward_withdraw(self, msg, srcip):
         if self.relations[srcip] == 'cust':
             for neighbor in self.ports:
                 if neighbor != srcip:
-                    self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(msg['src']), "dst": msg['src'], "msg": msg['msg']}))
+                    self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(neighbor), "dst": neighbor, "msg": msg['msg']}))
         else:
             for neighbor in self.ports:
                 if self.relations[neighbor] == 'cust' and neighbor != srcip:
-                    self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(msg['src']), "dst": msg['src'], "msg": msg['msg']}))
+                    self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(neighbor), "dst": neighbor, "msg": msg['msg']}))
 
     def process_data(self, msg, srcip):
-        self.send(self.find_routing(msg['dst']), json.dumps(msg))
+        destination = self.find_routing(msg['dst'])
+        if destination == None:
+            self.send(srcip, json.dumps({"src": msg['dst'], "dst": msg['src'], "type": "no route", "msg":  {}}))
+        else:
+            if self.relations[srcip] == 'cust' or self.relations[destination] == 'cust':
+                self.send(destination, json.dumps(msg))
+            else:
+                self.send(srcip, json.dumps({"src": msg['dst'], "dst": msg['src'], "type": "no route", "msg":  {}}))
 
     def process_no_route(self, msg, srcip):
         pass
 
     def process_dump(self, msg, srcip):
         self.send(msg['src'], json.dumps({ "type": "table", "src": self.our_addr(msg['src']), "dst": msg['src'], "msg": self.routing_table}))
+        print(self.sort_rt(self.routes_heard))
 
     def process_table(self, msg, srcip):
         pass
 
     def send(self, network, message):
+        print(f'Sending {message} to {network}')
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
     def run(self):
@@ -213,8 +397,7 @@ class Router:
                         srcip = sock
                         break
                 msg = json.loads(k.decode('utf-8'))
-                print(type(srcip))
-
+                print("Received message '%s' from %s" % (msg, srcip))
                 if msg['type'] == "handshake":
                     self.process_handsake(msg, srcip)
                 if msg['type'] == "update":
@@ -229,8 +412,6 @@ class Router:
                     self.process_dump(msg, srcip)
                 if msg['type'] == "table":
                     self.process_table(msg, srcip)
-
-                print("Received message '%s' from %s" % (msg, srcip))
 
         return
 
