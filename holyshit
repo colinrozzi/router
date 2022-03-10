@@ -1,0 +1,390 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math
+from hashlib import new
+from operator import eq, ne
+
+class Router:
+    relations = {}
+    sockets = {}
+    ports = {}
+    updates_heard = []
+    routes_head = []
+    routing_table = []
+    aggregation_table = {}
+
+    def __init__(self, asn, connections):
+        print("Router at AS %s starting up" % asn)
+        self.asn = asn
+
+        for relationship in connections:
+            port, neighbor, relation = relationship.split("-")
+
+            self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sockets[neighbor].bind(('localhost', 0))
+            self.ports[neighbor] = int(port)
+            self.relations[neighbor] = relation
+            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+
+    def our_addr(self, dst):
+        quads = list(int(qdn) for qdn in dst.split('.'))
+        quads[3] = 1
+        return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
+   
+    def update_routing(self, msg, srcip):
+        route_dict = {
+            "network" : msg['msg']['network'], 
+            "netmask" : msg['msg']['netmask'], 
+            "peer" : srcip, 
+            "localpref": msg['msg']['localpref'], 
+            "ASPath": msg['msg']['ASPath'], 
+            "selfOrigin": msg['msg']['selfOrigin'], 
+            "origin": msg['msg']['origin']
+        }
+        # self.routing_table.append(route_dict)
+        self.updates_heard.append(route_dict)
+        print(self.updates_heard)
+        self.routes_head.append(route_dict)
+        self.routing_table = self.aggregate_rt()
+        # print('s', self.sort_rt())
+
+    def aggregate_rt(self):
+        sorted_rt = self.sort_rt()
+        aggregated_rt = self.aggregate(sorted_rt)
+        return aggregated_rt
+
+    def aggregate(self, routing_table):
+        print('AGGREGATING AJNMAJAJAJAJAJAJAJAJ')
+        new_table = []
+        changed = False
+        aggregated = []
+        for i in range(len(routing_table)):
+            print('working on ', routing_table[i])
+            print(i)
+            if not i in aggregated:
+                if i != (len(routing_table) - 1):
+                    if (routing_table[i]['peer'] == routing_table[i + 1]['peer'] and routing_table[i]['localpref'] == routing_table[i + 1]['localpref'] and routing_table[i]['ASPath'] == routing_table[i + 1]['ASPath'] and routing_table[i]['selfOrigin'] == routing_table[i + 1]['selfOrigin'] and routing_table[i]['origin'] == routing_table[i + 1]['origin']):
+                        print('everything matches!')
+                        print(f'aggregateing {routing_table[i]}')
+                        print(f'and {routing_table[i+1]}')
+                        new_table.append(self.new_entry(routing_table[i], routing_table[i + 1]))
+                        aggregated.append(i)
+                        aggregated.append(i + 1)
+                        changed = True
+                    else:
+                        new_table.append(routing_table[i])
+                else:
+                    new_table.append(routing_table[i])
+        print('done')
+        if changed:
+            print(new_table)
+            print('going again')
+            return self.aggregate(new_table)
+        else:
+            return new_table
+
+    def new_entry(self, route1, route2):
+        new_stuff = self.new_bits(route1, route2)
+        network = self.convert_decimal(new_stuff[0])
+        print('network', network)
+        netmask = self.convert_decimal(new_stuff[1])
+        print('netmask', netmask)
+        route_dict = {
+            "network" : network, 
+            "netmask" : netmask, 
+            "peer" : route1['peer'],
+            "localpref": route1['localpref'],
+            "ASPath": route1['ASPath'],
+            "selfOrigin": route1['selfOrigin'],
+            "origin": route1['origin']
+        }
+        return route_dict
+
+    def new_bits(self, route1, route2):
+        one_bits = self.relevant_bits(route1['network'], route1['netmask'])
+        two_bits = self.relevant_bits(route2['network'], route2['netmask'])
+        bits = ''
+        netmask = ''
+        for j in range(min(len(one_bits), len(two_bits))):
+            if one_bits[j] == two_bits[j]:
+                bits += one_bits[j]
+                netmask += '1'
+            else:
+                print(bits)
+                print(netmask)
+
+                return (bits, netmask)
+
+    def convert_decimal(self, bits):
+        print(bits)
+        print('whaaaaat')
+        while len(bits) < 32:
+            bits += '0'
+        print(bits)
+        print(bits[:8])
+        print(int(bits[:8], 2))
+        quads = []
+        quads.append(int(bits[:8], 2))
+        quads.append(int(bits[8:16], 2))
+        quads.append(int(bits[16:24], 2))
+        quads.append(int(bits[24:32], 2))
+        print(quads)
+        return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
+    
+    def sort_rt(self):
+        unsorted_rt = self.routes_head.copy()
+        sorted_rt = []
+
+        while len(unsorted_rt) > 0:
+            # print('current unsorted', unsorted_rt)
+            min_route = None
+            for i in range(len(unsorted_rt)):
+                # print(f'working on {unsorted_rt[i]}')
+                if min_route == None:
+                    min_route = unsorted_rt[i]
+                else:
+                    c = self.less_than(min_route, unsorted_rt[i])
+                    # print('c is ', c)
+                    if c == 2:
+                        min_route = unsorted_rt[i]
+            # print('found min', min_route)
+            sorted_rt.append(min_route)
+            unsorted_rt.remove(min_route)
+        return sorted_rt
+    
+    def less_than(self, route1, route2):
+        one_bits = self.relevant_bits(route1['network'], route1['netmask'])
+        two_bits = self.relevant_bits(route2['network'], route2['netmask'])
+        # print(f'comparing {one_bits}, {two_bits}')
+        if len(one_bits) == len(two_bits):
+            for i in range(len(one_bits)):
+                # print(i)
+                if one_bits[i] < two_bits[i]:
+                    # print(1)
+                    return 1
+                if two_bits[i] < one_bits[i]:
+                    # print(2)
+                    return 2
+                # print('nothing')
+            return 1
+        else:
+            if len(one_bits) < len(two_bits):
+                return 1
+            else:
+                return 2
+
+    def better_route(self, route1, route2):
+        if route1 == None:
+            return route2
+        if route2 == None:
+            return route1
+        if route1['localpref'] == route2['localpref']:
+            if route1['selfOrigin'] == route2['selfOrigin']:
+                if route1['ASPath'] == route2['ASPath']:
+                    if route1['origin'] == route2['origin']:
+                        if route1['peer'] < route2['peer']:
+                            return route1
+                        else:
+                            return route2
+                    else:
+
+                        if route1['origin'] == 'IGP':
+                            return route1
+                        if route2['origin'] == 'IGP':
+                            return route2
+                        if route1['origin'] == 'EGP':
+                            return route1
+                        if route2['origin'] == 'EGP':
+                            return route2
+                        if route1['origin'] == 'UNK':
+                            return route1
+                        if route2['origin'] == 'UNK':
+                            return route2
+                else:
+                    if len(route1['ASPath']) < len(route2['ASPath']):
+                        return route1
+                    else:
+                        return route2
+            else:
+                if route1['selfOrigin'] == True:
+                    return route1
+                else:
+                    return route2
+        else:
+            if route1['localpref'] > route2['localpref']:
+                return route1
+            else:
+                return route2
+
+    def relevant_bits(self, network, netmask):
+        network_b = self.convert_to_binary(network)
+        netmask_b = self.convert_to_binary(netmask)
+        final_ip = ''
+        for i in range(len(network_b)):
+            if netmask_b[i] == '1':
+                final_ip += network_b[i]
+        return final_ip
+
+    def convert_to_binary(self, num):
+        split = num.split('.')
+        binary_string = ''
+        for section in split:
+            binary_string += '{0:08b}'.format(int(section))
+        return binary_string
+
+    def find_routing(self, ip):
+        best_route = None
+        best_len = 0
+        for route in self.routing_table:
+            rt_ip = self.relevant_bits(route['network'], route['netmask'])
+            if self.matches(ip, rt_ip) and len(rt_ip) >= best_len:
+                best_len = len(rt_ip)
+                best_route = self.better_route(best_route, route)
+        if best_route == None:
+            return None
+        else:
+            return best_route['peer']
+
+    def matches(self, ip, rt_ip):
+        bit_ip = self.convert_to_binary(ip)
+        for c in range(len(rt_ip)):
+            if not bit_ip[c] == rt_ip[c]:
+                return False
+        return True
+
+    def make_sendable_update(self, msg, src, dest):
+        new_aspath = [self.asn]
+        for asn in msg['msg']['ASPath']:
+            new_aspath.append(asn)
+
+        sendable_dict = {
+            "src":  src,
+            "dst":  dest,
+            "type": "update",                   
+            "msg": 
+            {
+                "network":    msg['msg']['network'],
+                "netmask":    msg['msg']['netmask'],
+                "ASPath":     new_aspath,
+            }
+        }
+        return json.dumps(sendable_dict)
+
+    def process_handshake(self, msg, srcip):
+        print('HANDSHAKE RECEIVED')
+        print('')
+        print('')
+        print('RED ALERT')
+        print('')
+        print('')
+        print('HANDSHAKE RECEIVED')
+
+    def process_update(self, msg, srcip):
+        self.updates_heard.append({'update':msg['msg'], 'neighbor':srcip})
+        self.forward_update(msg, srcip)
+        self.update_routing(msg, srcip)
+        
+    def forward_update(self, msg, srcip):
+        if self.relations[srcip] == 'cust':
+            for neighbor in self.ports:
+                if neighbor != srcip:
+                    self.send(neighbor, self.make_sendable_update(msg, self.our_addr(neighbor), neighbor))
+        else:
+            for neighbor in self.ports:
+                if self.relations[neighbor] == 'cust' and neighbor != srcip:
+                    self.send(neighbor, self.make_sendable_update(msg, self.our_addr(neighbor), neighbor))
+
+    def dumpable_ft(self):
+        table = []
+        for update in self.routing_table:
+            table.append(update.table_dict())
+        return table
+
+    def process_withdraw(self, msg, srcip):
+        self.remove_routes(msg, srcip)
+        self.forward_withdraw(msg, srcip)
+        self.routing_table = self.aggregate_rt()
+
+    def remove_routes(self, msg, srcip):
+        new_routes = []
+        for route in self.routes_heard:
+            remove = False
+            for dep_route in msg['msg']:
+                if dep_route['network'] == route['network'] and dep_route['netmask'] == route['netmask'] and srcip == route['peer']:
+                    remove = True
+            if not remove:
+                new_routes.append(route)
+        self.routes_heard = new_routes
+
+    def forward_withdraw(self, msg, srcip):
+        if self.relations[srcip] == 'cust':
+            for neighbor in self.ports:
+                if neighbor != srcip:
+                    self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(neighbor), "dst": neighbor, "msg": msg['msg']}))
+        else:
+            for neighbor in self.ports:
+                if self.relations[neighbor] == 'cust' and neighbor != srcip:
+                    self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(neighbor), "dst": neighbor, "msg": msg['msg']}))
+
+    def process_data(self, msg, srcip):
+        destination = self.find_routing(msg['dst'])
+        if destination == None:
+            self.send(srcip, json.dumps({"src": msg['dst'], "dst": msg['src'], "type": "no route", "msg":  {}}))
+        else:
+            if self.relations[srcip] == 'cust' or self.relations[destination] == 'cust':
+                self.send(destination, json.dumps(msg))
+            else:
+                self.send(srcip, json.dumps({"src": msg['dst'], "dst": msg['src'], "type": "no route", "msg":  {}}))
+
+    def process_no_route(self, msg, srcip):
+        pass
+
+    def process_dump(self, msg, srcip):
+        self.send(msg['src'], json.dumps({ "type": "table", "src": self.our_addr(msg['src']), "dst": msg['src'], "msg": self.routing_table}))
+        print(self.sort_rt())
+
+    def process_table(self, msg, srcip):
+        pass
+
+    def send(self, network, message):
+        print(f'Sending {message} to {network}')
+        self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+
+    def run(self):
+        while True:
+            socks = select.select(self.sockets.values(), [], [], 0.1)[0]
+            for conn in socks:
+                k, addr = conn.recvfrom(65535)
+                srcip = None
+                for sock in self.sockets:
+                    if self.sockets[sock] == conn:
+                        srcip = sock
+                        break
+                msg = json.loads(k.decode('utf-8'))
+                print("Received message '%s' from %s" % (msg, srcip))
+                if msg['type'] == "handshake":
+                    self.process_handsake(msg, srcip)
+                if msg['type'] == "update":
+                    self.process_update(msg, srcip)
+                if msg['type'] == "withdraw":
+                    self.process_withdraw(msg, srcip)
+                if msg['type'] == "data":
+                    self.process_data(msg, srcip)
+                if msg['type'] == "no route":
+                    self.process_no_route(msg, srcip)
+                if msg['type'] == "dump":
+                    self.process_dump(msg, srcip)
+                if msg['type'] == "table":
+                    self.process_table(msg, srcip)
+
+                
+
+        return
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='route packets')
+    parser.add_argument('asn', type=int, help="AS number of this router")
+    parser.add_argument('connections', metavar='connections', type=str, nargs='+', help="connections")
+    args = parser.parse_args()
+    router = Router(args.asn, args.connections)
+    router.run()
