@@ -1,71 +1,20 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
-
-from pyrsistent import v
-
-class Update:
-    def __init__(self, update):
-        self.source = update['src']
-        self.network = update['msg']['network']
-        self.netmask = update['msg']['netmask']
-        self.localpref = update['msg']['localpref']
-        self.aspath = update['msg']['ASPath']
-        self.origin = update['msg']['selfOrigin']
-
-    def in_range(self, ip):
-        ip_b = self.convert_to_binary(ip)
-        network_b = self.convert_to_binary(self.network)
-        netmask_b = self.convert_to_binary(self.network)
-        for i in range(len(netmask_b)):
-            if netmask_b[i] == '1':
-                if ip_b[i] != network_b[i]:
-                    return False
-            return True
-
-    def netmask_len(self):
-        netmask_b = self.convert_to_binary(self.network)
-        netmask_len = 0
-        for c in netmask_b:
-            if c == '1':
-                netmask_len += 1
-        return netmask_len
-    
-    def convert_to_binary(self, num):
-        split = num.split('.')
-        binary_string = ''
-        for section in split:
-            binary_string += '{0:08b}'.format(int(section))
-
-class ForwardingTable:
-    def __init__(self):
-        self.updates_heard = []
-        self.routes = []
-
-    def update(self, update):
-        self.updates_heard.append(update)
-        self.routes.append(update)
-
-    def find_route(self, dest):
-        best_neighbor = None
-        best_len = 0
-        for route in self.routes:
-            if route.in_range(dest):
-                if route.netmask_len() > best_len:
-                    best_neighbor = route.source
-                    best_len = route.netmask_len()
-        return best_neighbor
+from operator import ne
 
 class Router:
 
     relations = {}
     sockets = {}
     ports = {}
+    updates_heard = []
+    routing_table = []
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
-        self.forwarding = ForwardingTable()
+
         for relationship in connections:
             port, neighbor, relation = relationship.split("-")
 
@@ -80,8 +29,177 @@ class Router:
         quads[3] = 1
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
+    def update_routing(self, msg):
+        route_dict = {
+            "network" : msg['msg']['network'], 
+            "netmask" : msg['msg']['netmask'], 
+            "peer" : msg['src'], 
+            "localpref": msg['msg']['localpref'], 
+            "ASPath": msg['msg']['ASPath'], 
+            "selfOrigin": msg['msg']['selfOrigin'], 
+            "origin": msg['msg']['origin']
+        }
+        self.add_to_routing(route_dict)
+
+        # if not self.check_exists(route_dict):
+        #     self.routing_table.append(route_dict)
+        
+    def add_to_routing(self, route_dict):
+        new_routing = []
+        new_route = self.relevant_bits(route_dict['network'], route_dict['netmask'])
+        for route in self.routing_table:
+            existing_route = self.relevant_bits(route['network'], route['netmask'])
+            if new_route == existing_route:
+                
+                
+
+
+    def check_exists(self, route_dict):
+        relevant_bits = self.relevant_bits(route_dict['network'], route_dict['netmask'])
+        for existing_route in self.routing_table:
+            existing_route_bits = self.relevant_bits(existing_route['network'], existing_route['netmask'])
+            if relevant_bits == existing_route_bits:
+                return True
+        return False
+        
+        # for update in self.updates_heard:
+        #     routing_ip = self.relevant_bits(update['update']['network'], update['update']['netmask'])
+        #     if not routing_ip in self.rt_ips:
+        #         self.rt_ips.append(routing_ip)
+        #         self.rt_neighbors[routing_ip] = update['neighbor']
+        #         self.rt_updates[routing_ip] = update
+        #     else:
+        #         best_update = self.compare_updates(update, self.rt_updates[routing_ip])
+        #         self.rt_neighbors[routing_ip] = best_update['neighbor']
+        #         self.rt_updates[routing_ip] = best_update
+
+    def compare_updates(self, update1, update2):
+        # TODO: implement compare updates
+        return update1
+
+    def relevant_bits(self, network, netmask):
+        network_b = self.convert_to_binary(network)
+        netmask_b = self.convert_to_binary(netmask)
+        final_ip = ''
+        for i in range(len(network_b)):
+            if netmask_b[i] == '1':
+                final_ip += network_b[i]
+        return final_ip
+
+    def convert_to_binary(self, num):
+        split = num.split('.')
+        binary_string = ''
+        for section in split:
+            binary_string += '{0:08b}'.format(int(section))
+        return binary_string
+
+    def find_routing(self, ip):
+        best_neighbor = None
+        best_len = 0
+        for route in self.routing_table:
+            rt_ip = self.relevant_bits(route['network'], route['netmask'])
+            if self.matches(ip, route) and len(rt_ip) > best_len:
+                best_neighbor = route['peer']
+        return best_neighbor
+
+    def matches(self, ip, route):
+        bit_ip = self.convert_to_binary(ip)
+        rt_ip = self.relevant_bits(route['network'], route['netmask'])
+        for c in range(len(rt_ip)):
+            if not bit_ip[c] == rt_ip[c]:
+                return False
+        return True
+
+    def make_sendable_update(self, msg, src, dest):
+        new_aspath = [self.asn]
+        for asn in msg['msg']['ASPath']:
+            new_aspath.append(asn)
+
+        sendable_dict = {
+            "src":  src,
+            "dst":  dest,
+            "type": "update",                   
+            "msg": 
+            {
+                "network":    msg['msg']['network'],
+                "netmask":    msg['msg']['netmask'],
+                "ASPath":     new_aspath,
+            }
+        }
+        return json.dumps(sendable_dict)
+
+    def process_handshake(self, msg, srcip):
+        print('HANDSHAKE RECEIVED')
+        print('')
+        print('')
+        print('RED ALERT')
+        print('')
+        print('')
+        print('HANDSHAKE RECEIVED')
+
+    def process_update(self, msg, srcip):
+        self.updates_heard.append({'update':msg['msg'], 'neighbor':srcip})
+        self.forward_update(msg, srcip)
+        for neighbor in self.ports:
+            if neighbor != srcip:
+                self.send(neighbor, self.make_sendable_update(msg, self.our_addr(neighbor), neighbor))
+        self.update_routing(msg)
+        print(self.rt_neighbors)
+
+    def forward_update(self, msg, srcip):
+        if self.relations[srcip] == 'cust':
+            for neighbor in self.ports:
+                if neighbor != srcip:
+                    self.send(neighbor, self.make_sendable_update(msg, self.our_addr(neighbor), neighbor))
+        else:
+            for neighbor in self.ports:
+                if self.relations[neighbor] == 'cust' and neighbor != srcip:
+                    self.send(neighbor, self.make_sendable_update(msg, self.our_addr(neighbor), neighbor))
+
+    def dumpable_ft(self):
+        table = []
+        for update in self.routing_table:
+            table.append(update.table_dict())
+        return table
+
+    def process_withdraw(self, msg, srcip):
+        self.remove_routes(msg, srcip)
+        self.forward_withdraw(msg, srcip)
+
+    def remove_routes(self, msg, srcip):
+        new_routes = []
+        for route in self.routing_table:
+            remove = False
+            for dep_route in msg['msg']:
+                if dep_route['network'] == route['network'] and dep_route['netmask'] == route['netmask'] and srcip == route['peer']:
+                    remove = True
+            if not remove:
+                new_routes.append(route)
+        self.routing_table = new_routes
+
+    def forward_withdraw(self, msg, srcip):
+        if self.relations[srcip] == 'cust':
+            for neighbor in self.ports:
+                if neighbor != srcip:
+                    self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(msg['src']), "dst": msg['src'], "msg": msg['msg']}))
+        else:
+            for neighbor in self.ports:
+                if self.relations[neighbor] == 'cust' and neighbor != srcip:
+                    self.send(neighbor, json.dumps({ "type": "withdraw", "src": self.our_addr(msg['src']), "dst": msg['src'], "msg": msg['msg']}))
+
+    def process_data(self, msg, srcip):
+        self.send(self.find_routing(msg['dst']), json.dumps(msg))
+
+    def process_no_route(self, msg, srcip):
+        pass
+
+    def process_dump(self, msg, srcip):
+        self.send(msg['src'], json.dumps({ "type": "table", "src": self.our_addr(msg['src']), "dst": msg['src'], "msg": self.routing_table}))
+
+    def process_table(self, msg, srcip):
+        pass
+
     def send(self, network, message):
-        print(f'Sending {message} to {network}')
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
     def run(self):
@@ -95,22 +213,22 @@ class Router:
                         srcip = sock
                         break
                 msg = json.loads(k.decode('utf-8'))
+                print(type(srcip))
 
                 if msg['type'] == "handshake":
-                    pass
+                    self.process_handsake(msg, srcip)
                 if msg['type'] == "update":
-                    self.forwarding.update(Update(msg))
+                    self.process_update(msg, srcip)
                 if msg['type'] == "withdraw":
-                    pass
+                    self.process_withdraw(msg, srcip)
                 if msg['type'] == "data":
-                    self.send(self.forwarding.find_route(msg['dst']), msg)
+                    self.process_data(msg, srcip)
                 if msg['type'] == "no route":
-                    pass
+                    self.process_no_route(msg, srcip)
                 if msg['type'] == "dump":
-                    pass
+                    self.process_dump(msg, srcip)
                 if msg['type'] == "table":
-                    pass
-
+                    self.process_table(msg, srcip)
 
                 print("Received message '%s' from %s" % (msg, srcip))
 
